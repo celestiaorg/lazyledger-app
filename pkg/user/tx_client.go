@@ -433,37 +433,39 @@ func (client *TxClient) ConfirmTx(ctx context.Context, txHash string) (*TxRespon
 			return nil, err
 		}
 
-		switch resp.Status {
-		case core.TxStatusPending:
-			// Continue polling if the transaction is still pending
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-pollTicker.C:
-				continue
-			}
-		case core.TxStatusCommitted:
-			txResponse := &TxResponse{
-				Height: resp.Height,
-				TxHash: txHash,
-				Code:   resp.ExecutionCode,
-			}
-			if resp.ExecutionCode != abci.CodeTypeOK {
-				executionErr := &ExecutionError{
-					TxHash:   txHash,
-					Code:     resp.ExecutionCode,
-					ErrorLog: resp.Error,
+		if resp != nil {
+			switch resp.Status {
+			case core.TxStatusPending:
+				// Continue polling if the transaction is still pending
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-pollTicker.C:
+					continue
+				}
+			case core.TxStatusCommitted:
+				txResponse := &TxResponse{
+					Height: resp.Height,
+					TxHash: txHash,
+					Code:   resp.ExecutionCode,
+				}
+				if resp.ExecutionCode != abci.CodeTypeOK {
+					executionErr := &ExecutionError{
+						TxHash:   txHash,
+						Code:     resp.ExecutionCode,
+						ErrorLog: resp.Error,
+					}
+					client.deleteFromTxTracker(txHash)
+					return nil, executionErr
 				}
 				client.deleteFromTxTracker(txHash)
-				return nil, executionErr
+				return txResponse, nil
+			case core.TxStatusEvicted:
+				return nil, client.handleEvictions(txHash)
+			default:
+				client.deleteFromTxTracker(txHash)
+				return nil, fmt.Errorf("transaction with hash %s not found; it was likely rejected", txHash)
 			}
-			client.deleteFromTxTracker(txHash)
-			return txResponse, nil
-		case core.TxStatusEvicted:
-			return nil, client.handleEvictions(txHash)
-		default:
-			client.deleteFromTxTracker(txHash)
-			return nil, fmt.Errorf("transaction with hash %s not found; it was likely rejected", txHash)
 		}
 	}
 }
