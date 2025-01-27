@@ -43,14 +43,14 @@ func TestMaxTotalBlobSizeDecorator(t *testing.T) {
 		{
 			name: "PFB with 1 blob that is 1 MiB",
 			pfb: &blob.MsgPayForBlobs{
-				BlobSizes: []uint32{mebibyte},
+				BlobSizes: []uint32{Mebibyte},
 			},
 			appVersion: v1.Version,
 		},
 		{
 			name: "PFB with 1 blob that is 2 MiB",
 			pfb: &blob.MsgPayForBlobs{
-				BlobSizes: []uint32{2 * mebibyte},
+				BlobSizes: []uint32{2 * Mebibyte},
 			},
 			appVersion: v1.Version,
 			// This test case should return an error because a square size of 64
@@ -68,7 +68,7 @@ func TestMaxTotalBlobSizeDecorator(t *testing.T) {
 		{
 			name: "PFB with 2 blobs that are 1 MiB each",
 			pfb: &blob.MsgPayForBlobs{
-				BlobSizes: []uint32{mebibyte, mebibyte},
+				BlobSizes: []uint32{Mebibyte, Mebibyte},
 			},
 			appVersion: v1.Version,
 			// This test case should return an error for the same reason a
