@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"time"
+
+	blobtypes "github.com/celestiaorg/celestia-app/v3/x/blob/types"
 
 	"github.com/celestiaorg/go-square/v2"
 	"github.com/celestiaorg/go-square/v2/share"
@@ -34,10 +37,36 @@ import (
 	"github.com/celestiaorg/celestia-app/v3/test/util"
 	"github.com/celestiaorg/celestia-app/v3/test/util/genesis"
 	"github.com/celestiaorg/celestia-app/v3/test/util/testnode"
-	blobtypes "github.com/celestiaorg/celestia-app/v3/x/blob/types"
 )
 
 var defaultNamespace share.Namespace
+
+// emptyBlockData contains the protobuf block data for a block without transactions.
+var emptyBlockData = func() tmproto.Data {
+	dataSquare, txs, err := square.Build(
+		[][]byte{},
+		maxSquareSize,
+		appconsts.SubtreeRootThreshold(1),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	eds, err := da.ExtendShares(share.ToBytes(dataSquare))
+	if err != nil {
+		panic(err)
+	}
+
+	dah, err := da.NewDataAvailabilityHeader(eds)
+	if err != nil {
+		panic(err)
+	}
+	return tmproto.Data{
+		Txs:        txs,
+		Hash:       dah.Hash(),
+		SquareSize: uint64(dataSquare.Size()),
+	}
+}()
 
 const (
 	defaultNamespaceStr = "test"
@@ -175,14 +204,14 @@ func Run(ctx context.Context, cfg BuilderConfig, dir string) error {
 	validatorKey := privval.LoadFilePV(tmCfg.PrivValidatorKeyFile(), tmCfg.PrivValidatorStateFile())
 	validatorAddr := validatorKey.Key.Address
 
-	blockDB, err := dbm.NewDB("blockstore", dbm.GoLevelDBBackend, tmCfg.DBDir())
+	blockDB, err := dbm.NewDB("blockstore", dbm.PebbleDBBackend, tmCfg.DBDir())
 	if err != nil {
 		return fmt.Errorf("failed to create block database: %w", err)
 	}
 
 	blockStore := store.NewBlockStore(blockDB)
 
-	stateDB, err := dbm.NewDB("state", dbm.GoLevelDBBackend, tmCfg.DBDir())
+	stateDB, err := dbm.NewDB("state", dbm.PebbleDBBackend, tmCfg.DBDir())
 	if err != nil {
 		return fmt.Errorf("failed to create state database: %w", err)
 	}
@@ -321,108 +350,116 @@ func Run(ctx context.Context, cfg BuilderConfig, dir string) error {
 			break
 		}
 
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case dataPB := <-dataCh:
-			data, err := types.DataFromProto(dataPB)
-			if err != nil {
-				return fmt.Errorf("failed to convert data from protobuf: %w", err)
+		var dd *tmproto.Data
+		if height == 1 {
+			// generating an empty block for height 1
+			dd = &emptyBlockData
+		} else {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case dataPB := <-dataCh:
+				dd = dataPB
 			}
-			block, blockParts := state.MakeBlock(height, data, commit, nil, validatorAddr)
-			blockID := types.BlockID{
-				Hash:          block.Hash(),
-				PartSetHeader: blockParts.Header(),
-			}
+		}
 
-			precommitVote := &tmproto.Vote{
-				Height:           height,
-				Round:            0,
-				Type:             tmproto.PrecommitType,
-				BlockID:          blockID.ToProto(),
-				ValidatorAddress: validatorAddr,
-				Timestamp:        currentTime,
-				Signature:        nil,
-			}
+		data, err := types.DataFromProto(dd)
+		if err != nil {
+			return fmt.Errorf("failed to convert data from protobuf: %w", err)
+		}
+		block, blockParts := state.MakeBlock(height, data, commit, nil, validatorAddr)
+		blockID := types.BlockID{
+			Hash:          block.Hash(),
+			PartSetHeader: blockParts.Header(),
+		}
 
-			if err := validatorKey.SignVote(state.ChainID, precommitVote); err != nil {
-				return fmt.Errorf("failed to sign precommit vote (%s): %w", precommitVote.String(), err)
-			}
+		precommitVote := &tmproto.Vote{
+			Height:           height,
+			Round:            0,
+			Type:             tmproto.PrecommitType,
+			BlockID:          blockID.ToProto(),
+			ValidatorAddress: validatorAddr,
+			Timestamp:        currentTime,
+			Signature:        nil,
+		}
 
-			commitSig := types.CommitSig{
-				BlockIDFlag:      types.BlockIDFlagCommit,
-				ValidatorAddress: validatorAddr,
-				Timestamp:        currentTime,
-				Signature:        precommitVote.Signature,
-			}
-			commit = types.NewCommit(height, 0, blockID, []types.CommitSig{commitSig})
+		if err := validatorKey.SignVote(state.ChainID, precommitVote); err != nil {
+			return fmt.Errorf("failed to sign precommit vote (%s): %w", precommitVote.String(), err)
+		}
 
-			var lastCommitInfo abci.LastCommitInfo
-			if height > 1 {
-				lastCommitInfo = abci.LastCommitInfo{
-					Round: 0,
-					Votes: []abci.VoteInfo{
-						{
-							Validator: abci.Validator{
-								Address: validatorAddr,
-								Power:   validatorPower,
-							},
-							SignedLastBlock: true,
+		commitSig := types.CommitSig{
+			BlockIDFlag:      types.BlockIDFlagCommit,
+			ValidatorAddress: validatorAddr,
+			Timestamp:        currentTime,
+			Signature:        precommitVote.Signature,
+		}
+		commit = types.NewCommit(height, 0, blockID, []types.CommitSig{commitSig})
+
+		var lastCommitInfo abci.LastCommitInfo
+		if height > 1 {
+			lastCommitInfo = abci.LastCommitInfo{
+				Round: 0,
+				Votes: []abci.VoteInfo{
+					{
+						Validator: abci.Validator{
+							Address: validatorAddr,
+							Power:   validatorPower,
 						},
+						SignedLastBlock: true,
 					},
-				}
-			}
-
-			beginBlockResp := simApp.BeginBlock(abci.RequestBeginBlock{
-				Hash:           block.Hash(),
-				Header:         *block.Header.ToProto(),
-				LastCommitInfo: lastCommitInfo,
-			})
-
-			deliverTxResponses := make([]*abci.ResponseDeliverTx, len(block.Data.Txs))
-
-			for idx, tx := range block.Data.Txs {
-				blobTx, isBlobTx := types.UnmarshalBlobTx(tx)
-				if isBlobTx {
-					tx = blobTx.Tx
-				}
-				deliverTxResponse := simApp.DeliverTx(abci.RequestDeliverTx{
-					Tx: tx,
-				})
-				if deliverTxResponse.Code != abci.CodeTypeOK {
-					return fmt.Errorf("failed to deliver tx: %s", deliverTxResponse.Log)
-				}
-				deliverTxResponses[idx] = &deliverTxResponse
-			}
-
-			endBlockResp := simApp.EndBlock(abci.RequestEndBlock{
-				Height: block.Height,
-			})
-
-			commitResp := simApp.Commit()
-			state.LastBlockHeight = height
-			state.LastBlockID = blockID
-			state.LastBlockTime = block.Time
-			state.LastValidators = state.Validators
-			state.Validators = state.NextValidators
-			state.NextValidators = state.NextValidators.CopyIncrementProposerPriority(1)
-			state.AppHash = commitResp.Data
-			state.LastResultsHash = sm.ABCIResponsesResultsHash(&smproto.ABCIResponses{
-				DeliverTxs: deliverTxResponses,
-				BeginBlock: &beginBlockResp,
-				EndBlock:   &endBlockResp,
-			})
-			currentTime = currentTime.Add(cfg.BlockInterval)
-			persistCh <- persistData{
-				state: state.Copy(),
-				block: block,
-				seenCommit: &types.Commit{
-					Height:     commit.Height,
-					Round:      commit.Round,
-					BlockID:    commit.BlockID,
-					Signatures: []types.CommitSig{commitSig},
 				},
 			}
+		}
+
+		beginBlockResp := simApp.BeginBlock(abci.RequestBeginBlock{
+			Hash:           block.Hash(),
+			Header:         *block.Header.ToProto(),
+			LastCommitInfo: lastCommitInfo,
+		})
+
+		deliverTxResponses := make([]*abci.ResponseDeliverTx, len(block.Data.Txs))
+
+		for idx, tx := range block.Data.Txs {
+			blobTx, isBlobTx := types.UnmarshalBlobTx(tx)
+			if isBlobTx {
+				tx = blobTx.Tx
+			}
+			deliverTxResponse := simApp.DeliverTx(abci.RequestDeliverTx{
+				Tx: tx,
+			})
+			if deliverTxResponse.Code != abci.CodeTypeOK {
+				return fmt.Errorf("failed to deliver tx: %s", deliverTxResponse.Log)
+			}
+			deliverTxResponses[idx] = &deliverTxResponse
+		}
+
+		endBlockResp := simApp.EndBlock(abci.RequestEndBlock{
+			Height: block.Height,
+		})
+
+		commitResp := simApp.Commit()
+		state.LastBlockHeight = height
+		state.LastBlockID = blockID
+		state.LastBlockTime = block.Time
+		state.LastValidators = state.Validators
+		state.Validators = state.NextValidators
+		state.NextValidators = state.NextValidators.CopyIncrementProposerPriority(1)
+		state.AppHash = commitResp.Data
+		state.LastResultsHash = sm.ABCIResponsesResultsHash(&smproto.ABCIResponses{
+			DeliverTxs: deliverTxResponses,
+			BeginBlock: &beginBlockResp,
+			EndBlock:   &endBlockResp,
+		})
+		currentTime = currentTime.Add(cfg.BlockInterval)
+		persistCh <- persistData{
+			state: state.Copy(),
+			block: block,
+			seenCommit: &types.Commit{
+				Height:     commit.Height,
+				Round:      commit.Round,
+				BlockID:    commit.BlockID,
+				Signatures: []types.CommitSig{commitSig},
+			},
 		}
 	}
 
@@ -458,7 +495,8 @@ func generateSquareRoutine(
 	cfg BuilderConfig,
 	dataCh chan<- *tmproto.Data,
 ) error {
-	for i := 0; i < cfg.NumBlocks; i++ {
+	// cfg.NumBlocks-1 because block 0 is genesis and block 1 shouldn't contain any transaction
+	for i := 0; i < cfg.NumBlocks-1; i++ {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -467,23 +505,29 @@ func generateSquareRoutine(
 
 		account := signer.Accounts()[0]
 
-		blob, err := share.NewV0Blob(cfg.Namespace, crypto.CRandBytes(cfg.BlockSize))
-		if err != nil {
-			return err
-		}
+		blobTxs := make([][]byte, 0)
+		numberOfBlobs := rand.Intn(100) + 1
+		blobSize := cfg.BlockSize / numberOfBlobs
+		for size := 0; size < cfg.BlockSize; size += blobSize {
+			blob, err := share.NewV0Blob(share.RandomNamespace(), crypto.CRandBytes(blobSize))
+			if err != nil {
+				return err
+			}
 
-		blobGas := blobtypes.DefaultEstimateGas([]uint32{uint32(cfg.BlockSize)})
-		fee := float64(blobGas) * appconsts.DefaultMinGasPrice * 2
-		tx, _, err := signer.CreatePayForBlobs(account.Name(), []*share.Blob{blob}, user.SetGasLimit(blobGas), user.SetFee(uint64(fee)))
-		if err != nil {
-			return err
-		}
-		if err := signer.IncrementSequence(account.Name()); err != nil {
-			return err
+			blobGas := blobtypes.DefaultEstimateGas([]uint32{uint32(blobSize)})
+			fee := float64(blobGas) * appconsts.DefaultMinGasPrice * 2
+			tx, _, err := signer.CreatePayForBlobs(account.Name(), []*share.Blob{blob}, user.SetGasLimit(blobGas), user.SetFee(uint64(fee)))
+			if err != nil {
+				return err
+			}
+			if err := signer.IncrementSequence(account.Name()); err != nil {
+				return err
+			}
+			blobTxs = append(blobTxs, tx)
 		}
 
 		dataSquare, txs, err := square.Build(
-			[][]byte{tx},
+			blobTxs,
 			maxSquareSize,
 			appconsts.SubtreeRootThreshold(1),
 		)

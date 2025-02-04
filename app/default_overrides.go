@@ -259,12 +259,12 @@ func DefaultConsensusConfig() *tmcfg.Config {
 	cfg := tmcfg.DefaultConfig()
 	// Set broadcast timeout to be 50 seconds in order to avoid timeouts for long block times
 	cfg.RPC.TimeoutBroadcastTxCommit = 50 * time.Second
-	cfg.RPC.MaxBodyBytes = int64(8388608) // 8 MiB
+	cfg.RPC.MaxBodyBytes = int64(83886080) // 8 MiB
 
 	cfg.Mempool.TTLNumBlocks = 12
 	cfg.Mempool.TTLDuration = 75 * time.Second
-	cfg.Mempool.MaxTxBytes = 7_897_088
-	cfg.Mempool.MaxTxsBytes = 39_485_440
+	cfg.Mempool.MaxTxBytes = 7_897_088_000
+	cfg.Mempool.MaxTxsBytes = 39_485_440_000
 	cfg.Mempool.Version = "v1" // prioritized mempool
 
 	cfg.Consensus.TimeoutPropose = appconsts.GetTimeoutPropose(appconsts.LatestVersion)
@@ -275,8 +275,8 @@ func DefaultConsensusConfig() *tmcfg.Config {
 	cfg.Storage.DiscardABCIResponses = true
 
 	const mebibyte = 1048576
-	cfg.P2P.SendRate = 10 * mebibyte
-	cfg.P2P.RecvRate = 10 * mebibyte
+	cfg.P2P.SendRate = 1000 * mebibyte
+	cfg.P2P.RecvRate = 1000 * mebibyte
 
 	return cfg
 }
@@ -296,6 +296,6 @@ func DefaultAppConfig() *serverconfig.Config {
 	cfg.MinGasPrices = fmt.Sprintf("%v%s", appconsts.DefaultMinGasPrice, BondDenom)
 
 	const mebibyte = 1048576
-	cfg.GRPC.MaxRecvMsgSize = 20 * mebibyte
+	cfg.GRPC.MaxRecvMsgSize = 40 * mebibyte
 	return cfg
 }
